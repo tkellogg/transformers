@@ -1345,6 +1345,14 @@ class GraniteMoeHybridModel(GraniteMoeHybridPreTrainedModel):
             1. Cached forward
             2. Attending to all inputs
         """
+        if attention_mask is not None and attention_mask.dim() != 2:
+            message = (
+                "GraniteMoeHybrid Mamba layers require a 2D padding mask of shape (batch, seq). "
+                f"Got attention_mask with shape {tuple(attention_mask.shape)}. "
+                "If you are passing a 4D causal mask, pass the 2D padding mask instead."
+            )
+            logger.error(message)
+            raise ValueError(message)
         mamba_mask = attention_mask
         if cache_position[0] > 0 or (attention_mask is not None and torch.all(attention_mask == 1)):
             mamba_mask = None
