@@ -19,6 +19,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from typing import Any, Callable, Optional, TypedDict, Union
 
 import torch
@@ -455,6 +456,7 @@ class GraniteMoeHybridMambaLayer(nn.Module):
         self.D = nn.Parameter(torch.ones(self.num_heads))
 
         self.out_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=self.use_bias)
+        self._shape_log_count = 0
 
         if not is_fast_path_available:
             logger.warning_once(
@@ -464,6 +466,42 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             )
         else:
             logger.warning_once("The fast path for GraniteMoeHybrid will be used when running the model on a GPU")
+
+    def _maybe_log_shapes(
+        self,
+        tag: str,
+        hidden_states: torch.Tensor | None,
+        projected_states: torch.Tensor | None,
+        gate: torch.Tensor | None,
+        hidden_states_B_C: torch.Tensor | None,
+        dt: torch.Tensor | None,
+        attention_mask: torch.Tensor | None,
+        cache_position: torch.Tensor | None,
+    ) -> None:
+        if os.environ.get("GRANITEMOEHYBRID_SHAPE_LOG", "0") != "1":
+            return
+        if self._shape_log_count >= 3:
+            return
+        self._shape_log_count += 1
+
+        def _shape(x: torch.Tensor | None):
+            return None if x is None else tuple(x.shape)
+
+        logger.error(
+            "GraniteMoeHybridMambaLayer[%s] %s shapes: hidden=%s projected=%s gate=%s hidden_BC=%s dt=%s "
+            "attn_mask=%s cache_position=%s dtype=%s device=%s",
+            self.layer_idx,
+            tag,
+            _shape(hidden_states),
+            _shape(projected_states),
+            _shape(gate),
+            _shape(hidden_states_B_C),
+            _shape(dt),
+            _shape(attention_mask),
+            _shape(cache_position),
+            None if hidden_states is None else str(hidden_states.dtype),
+            None if hidden_states is None else str(hidden_states.device),
+        )
 
     def cuda_kernels_forward(
         self,
@@ -496,6 +534,16 @@ class GraniteMoeHybridMambaLayer(nn.Module):
         if use_precomputed_states:
             gate, hidden_states_B_C, dt = projected_states.squeeze(1).split(
                 [self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
+            )
+            self._maybe_log_shapes(
+                "cuda_precomputed",
+                hidden_states,
+                projected_states,
+                gate,
+                hidden_states_B_C,
+                dt,
+                attention_mask,
+                cache_position,
             )
 
             # 2. Convolution sequence transformation
@@ -570,6 +618,16 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             else:
                 gate, hidden_states_B_C, dt = projected_states.split(
                     [self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
+                )
+                self._maybe_log_shapes(
+                    "cuda_fused",
+                    hidden_states,
+                    projected_states,
+                    gate,
+                    hidden_states_B_C,
+                    dt,
+                    attention_mask,
+                    cache_position,
                 )
 
                 # 2. Convolution sequence transformation
@@ -650,6 +708,16 @@ class GraniteMoeHybridMambaLayer(nn.Module):
         projected_states = self.in_proj(input_states)
         gate, hidden_states_B_C, dt = projected_states.split(
                 [self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
+        )
+        self._maybe_log_shapes(
+            "torch",
+            input_states,
+            projected_states,
+            gate,
+            hidden_states_B_C,
+            dt,
+            attention_mask,
+            cache_position,
         )
 
         use_precomputed_states = (
