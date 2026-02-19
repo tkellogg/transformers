@@ -63,6 +63,19 @@ if is_torch_flex_attn_available():
 logger = logging.get_logger(__name__)
 
 
+def _granite_attn_log_enabled() -> bool:
+    value = os.getenv("GRANITEMOEHYBRID_ATTN_LOG")
+    if value is None:
+        return False
+    value = value.strip().lower()
+    return value not in ("", "0", "false", "no")
+
+
+def _log_granite_attn(message: str, *args) -> None:
+    if _granite_attn_log_enabled():
+        logger.error(message, *args)
+
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -119,6 +132,26 @@ def eager_attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
+    if _granite_attn_log_enabled():
+        mask_shape = attention_mask.shape if attention_mask is not None else None
+        mask_dtype = attention_mask.dtype if attention_mask is not None else None
+        mask_device = attention_mask.device if attention_mask is not None else None
+        _log_granite_attn(
+            "GRANITE_ATTN eager_attention_forward: layer_idx=%s query=%s key=%s value=%s mask=%s mask_dtype=%s mask_device=%s "
+            "output_attentions=%s head_mask=%s dropout=%s scaling=%s",
+            getattr(module, "layer_idx", None),
+            tuple(query.shape),
+            tuple(key.shape),
+            tuple(value.shape),
+            mask_shape,
+            mask_dtype,
+            mask_device,
+            kwargs.get("output_attentions", False),
+            kwargs.get("head_mask", None),
+            dropout,
+            scaling,
+        )
+
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
 
@@ -207,6 +240,29 @@ class GraniteMoeHybridAttention(nn.Module):
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        if _granite_attn_log_enabled():
+            mask_shape = attention_mask.shape if attention_mask is not None else None
+            mask_dtype = attention_mask.dtype if attention_mask is not None else None
+            mask_device = attention_mask.device if attention_mask is not None else None
+            interface_name = getattr(attention_interface, "__name__", attention_interface.__class__.__name__)
+            _log_granite_attn(
+                "GRANITE_ATTN GraniteMoeHybridAttention.forward: layer_idx=%s impl=%s interface=%s hidden=%s query=%s key=%s value=%s "
+                "mask=%s mask_dtype=%s mask_device=%s output_attentions=%s head_mask=%s use_cache=%s",
+                self.layer_idx,
+                self.config._attn_implementation,
+                interface_name,
+                tuple(hidden_states.shape),
+                tuple(query_states.shape),
+                tuple(key_states.shape),
+                tuple(value_states.shape),
+                mask_shape,
+                mask_dtype,
+                mask_device,
+                kwargs.get("output_attentions", False),
+                kwargs.get("head_mask", None),
+                use_cache,
+            )
 
         attn_output, attn_weights = attention_interface(
             self,

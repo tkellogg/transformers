@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import torch
@@ -9,6 +10,19 @@ from ..utils import logging
 logger = logging.get_logger(__name__)
 
 _use_top_left_mask = flash_attn_supports_top_left_mask()
+
+
+def _granite_attn_log_enabled() -> bool:
+    value = os.getenv("GRANITEMOEHYBRID_ATTN_LOG")
+    if value is None:
+        return False
+    value = value.strip().lower()
+    return value not in ("", "0", "false", "no")
+
+
+def _log_granite_attn(message: str, *args) -> None:
+    if _granite_attn_log_enabled():
+        logger.error(message, *args)
 
 
 def flash_attention_forward(
@@ -23,6 +37,29 @@ def flash_attention_forward(
     softcap: Optional[float] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
+    if _granite_attn_log_enabled():
+        mask_shape = attention_mask.shape if attention_mask is not None else None
+        mask_dtype = attention_mask.dtype if attention_mask is not None else None
+        mask_device = attention_mask.device if attention_mask is not None else None
+        _log_granite_attn(
+            "GRANITE_ATTN flash_attention_forward: layer_idx=%s impl=%s query=%s key=%s value=%s mask=%s mask_dtype=%s mask_device=%s "
+            "output_attentions=%s head_mask=%s dropout=%s scaling=%s sliding_window=%s softcap=%s",
+            getattr(module, "layer_idx", None),
+            getattr(getattr(module, "config", None), "_attn_implementation", None),
+            tuple(query.shape),
+            tuple(key.shape),
+            tuple(value.shape),
+            mask_shape,
+            mask_dtype,
+            mask_device,
+            kwargs.get("output_attentions", False),
+            kwargs.get("head_mask", None),
+            dropout,
+            scaling,
+            sliding_window,
+            softcap,
+        )
+
     if kwargs.get("output_attentions", False) or kwargs.get("head_mask") is not None:
         logger.warning_once(
             "`flash_attention_2` does not support `output_attentions=True` or `head_mask`."
