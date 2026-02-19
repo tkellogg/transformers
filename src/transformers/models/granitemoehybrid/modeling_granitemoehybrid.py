@@ -441,15 +441,54 @@ class GraniteMoeHybridMambaLayer(nn.Module):
         selective_state_update = getattr(mamba_ssm, "selective_state_update", None)
         mamba_chunk_scan_combined = getattr(mamba_ssm, "mamba_chunk_scan_combined", None)
         mamba_split_conv1d_scan_combined = getattr(mamba_ssm, "mamba_split_conv1d_scan_combined", None)
+        if selective_state_update is None or mamba_chunk_scan_combined is None or mamba_split_conv1d_scan_combined is None:
+            try:
+                from mamba_ssm.ops.triton.selective_state_update import selective_state_update as _selective_state_update
+            except Exception:
+                _selective_state_update = None
+            if selective_state_update is None:
+                selective_state_update = _selective_state_update
+            try:
+                from mamba_ssm.ops.triton.ssd_combined import (
+                    mamba_chunk_scan_combined as _mamba_chunk_scan_combined,
+                    mamba_split_conv1d_scan_combined as _mamba_split_conv1d_scan_combined,
+                )
+            except Exception:
+                _mamba_chunk_scan_combined = None
+                _mamba_split_conv1d_scan_combined = None
+            if mamba_chunk_scan_combined is None:
+                mamba_chunk_scan_combined = _mamba_chunk_scan_combined
+            if mamba_split_conv1d_scan_combined is None:
+                mamba_split_conv1d_scan_combined = _mamba_split_conv1d_scan_combined
 
         global is_fast_path_available
-        is_fast_path_available = all((selective_state_update, causal_conv1d_fn, causal_conv1d_update))
+        is_fast_path_available = all(
+            (
+                selective_state_update,
+                causal_conv1d_fn,
+                causal_conv1d_update,
+                mamba_chunk_scan_combined,
+                mamba_split_conv1d_scan_combined,
+            )
+        )
 
         if not is_fast_path_available:
+            missing = []
+            if selective_state_update is None:
+                missing.append("selective_state_update")
+            if causal_conv1d_fn is None:
+                missing.append("causal_conv1d_fn")
+            if causal_conv1d_update is None:
+                missing.append("causal_conv1d_update")
+            if mamba_chunk_scan_combined is None:
+                missing.append("mamba_chunk_scan_combined")
+            if mamba_split_conv1d_scan_combined is None:
+                missing.append("mamba_split_conv1d_scan_combined")
             logger.warning_once(
-                "The fast path is not available because one of `(selective_state_update, causal_conv1d_fn, causal_conv1d_update)`"
-                " is None. Falling back to the naive implementation. To install follow https://github.com/state-spaces/mamba/#installation and"
-                " https://github.com/Dao-AILab/causal-conv1d"
+                "The fast path is not available because these kernels are missing: %s. Falling back to the naive "
+                "implementation. To install follow https://github.com/state-spaces/mamba/#installation and "
+                "https://github.com/Dao-AILab/causal-conv1d",
+                ", ".join(missing) if missing else "unknown",
             )
         else:
             logger.warning_once("The fast path for GraniteMoeHybrid will be used when running the model on a GPU")
@@ -1503,11 +1542,15 @@ class GraniteMoeHybridForCausalLM(GraniteMoeHybridPreTrainedModel, GenerationMix
             **kwargs,
         )
 
-        # Only compute necessary logits
+        # Only compute necessary logits (optional for SAE training)
         hidden_states = outputs.last_hidden_state
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
-        logits = logits / self.config.logits_scaling
+        skip_logits = os.getenv("GRANITEMOEHYBRID_SKIP_LOGITS", "0").lower() in {"1", "true", "yes"}
+        if skip_logits and labels is None:
+            logits = None
+        else:
+            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            logits = self.lm_head(hidden_states[:, slice_indices, :])
+            logits = logits / self.config.logits_scaling
 
         loss = None
         if labels is not None:
